@@ -1,13 +1,22 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, Alert, ScrollView, FlatList, Platform, Modal, Animated, Dimensions } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
-import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import Constants from 'expo-constants';
-import * as Calendar from 'expo-calendar';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import * as Calendar from 'expo-calendar';
+import Constants from 'expo-constants';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
+import { Alert, Animated, Dimensions, FlatList, Modal, Platform, Text as RNText, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { colors, styles } from './styles';
+2
+
+const ConfigContext = createContext({ escala: 1, setEscala: () => {} });
+
+function Text({ style, ...p }) {
+  const { escala } = useContext(ConfigContext);
+  const base = StyleSheet.flatten(style)?.fontSize || 14;
+  return <RNText {...p} style={[style, { fontSize: base * escala }]} />;
+}
 
 const ERRO = '#B3261E';
 const StyleSheetAbsolute = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 };
@@ -618,8 +627,11 @@ function HomeScreen({ navigation, route }) {
   const [usuario, setUsuario] = useState(route.params?.usuario ?? null);
 
   useEffect(() => {
-    if (!usuario) AsyncStorage.getItem('usuario').then((v) => v && setUsuario(JSON.parse(v)));
-  }, []);
+    const carregar = () =>
+      AsyncStorage.getItem('usuario').then((v) => v && setUsuario(JSON.parse(v)));
+    carregar();
+    return navigation.addListener('focus', carregar);
+  }, [navigation]);
 
   const handleSair = async () => {
     await AsyncStorage.removeItem('usuario');
@@ -630,9 +642,7 @@ function HomeScreen({ navigation, route }) {
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       <View style={styles.header}>
         <View>
-          <Text style={styles.saudacao}>Olá{usuario?.email ? `, ${usuario.email}` : '!'}</Text>
-          <Text style={styles.emailUsuario}>Usuário</Text>
-        </View>
+          <Text style={styles.saudacao}>Olá{usuario?.nome ? `, ${usuario.nome}` : usuario?.email ? `, ${usuario.email}` : '!'}</Text></View>
         <TouchableOpacity onPress={handleSair}>
           <Text style={styles.sair}>Sair</Text>
         </TouchableOpacity>
@@ -641,6 +651,59 @@ function HomeScreen({ navigation, route }) {
   );
 }
 
+const TAMANHOS = { Normal: 1, Grande: 1.2, 'Muito grande': 1.4 };
+
+function PerfilScreen({ navigation }) {
+  const { escala, setEscala } = useContext(ConfigContext);
+  const [usuario, setUsuario] = useState(null);
+  const [nome, setNome] = useState('');
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    AsyncStorage.getItem('usuario').then((v) => {
+      if (!v) return;
+      const u = JSON.parse(v);
+      setUsuario(u);
+      setNome(u.nome || '');
+    });
+  }, []);
+
+  const salvarNome = async () => {
+    if (!nome.trim()) return setMsg('Digite um nome.');
+    const novo = { ...(usuario || {}), nome: nome.trim() };
+    setUsuario(novo);
+    await AsyncStorage.setItem('usuario', JSON.stringify(novo));
+    setMsg('Nome salvo!');
+  };
+
+  const tamanhoAtual = Object.keys(TAMANHOS).find((k) => TAMANHOS[k] === escala) || 'Normal';
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+      <Text style={styles.secaoTitulo}>Perfil</Text>
+      <Text style={styles.rotulo}>E-mail</Text>
+      <Text style={[styles.cardTitulo, { marginBottom: 16 }]}>{usuario?.email || 'Modo demo (sem login)'}</Text>
+
+      <Text style={styles.rotulo}>Nome</Text>
+      <TextInput
+        style={styles.input}
+        placeholder="Seu nome"
+        placeholderTextColor={colors.textSecondary}
+        value={nome}
+        onChangeText={(v) => { setNome(v); setMsg(''); }}
+      />
+      {msg ? <Text style={styles.contador}>{msg}</Text> : null}
+      <TouchableOpacity style={styles.botao} onPress={salvarNome}>
+        <Text style={styles.botaoTexto}>Salvar nome</Text>
+      </TouchableOpacity>
+
+      <Text style={[styles.secaoTitulo, { marginTop: 28 }]}>Acessibilidade</Text>
+      <Text style={styles.rotulo}>Tamanho do texto</Text>
+      <Chips opcoes={Object.keys(TAMANHOS)} valor={tamanhoAtual} onChange={(k) => setEscala(TAMANHOS[k])} />
+      <Text style={styles.cardDescricao}>O tamanho escolhido fica salvo e vale para todas as telas.</Text>
+    </ScrollView>
+  );
+}
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -652,63 +715,46 @@ const MENU = [
   { nome: 'Lembretes', rotulo: 'Lembretes', icone: 'notifications-outline' },
   { nome: 'Notas', rotulo: 'Notas e Desempenho', icone: 'bar-chart-outline' },
   { nome: 'Metas', rotulo: 'Metas de Estudo', icone: 'flag-outline' },
+  { nome: 'Perfil', rotulo: 'Perfil e Acessibilidade', icone: 'person-outline' },
 ];
 const ICONES = Object.fromEntries(MENU.map((m) => [m.nome, m.icone]));
 
-function Tabs({ navigation }) {
+const navRef = createNavigationContainerRef();
+const MenuContext = createContext({ abrir: () => {} });
+
+function MenuProvider({ children }) {
   const [menu, setMenu] = useState(false);
   const anim = useRef(new Animated.Value(0)).current;
   const LARGURA = Math.min(320, Dimensions.get('window').width * 0.78);
 
   const abrir = () => {
     setMenu(true);
-    Animated.timing(anim, { toValue: 1, duration: 250, useNativeDriver: true }).start();
+    Animated.timing(anim, { toValue: 1, duration: 250, useNativeDriver: Platform.OS !== 'web' }).start();
   };
 
   const fechar = (depois) => {
-    Animated.timing(anim, { toValue: 0, duration: 200, useNativeDriver: true }).start(() => {
+    Animated.timing(anim, { toValue: 0, duration: 200, useNativeDriver: Platform.OS !== 'web' }).start(() => {
       setMenu(false);
       if (depois) depois();
     });
   };
 
   const ir = (item) => fechar(() => {
-    if (item.aba) navigation.navigate('Main', { screen: item.nome });
-    else navigation.navigate(item.nome);
+    if (item.aba) navRef.navigate('Main', { screen: item.nome });
+    else navRef.navigate(item.nome);
   });
 
   const sair = async () => {
     await AsyncStorage.removeItem('usuario');
-    fechar(() => navigation.replace('Login'));
+    fechar(() => navRef.reset({ index: 0, routes: [{ name: 'Login' }] }));
   };
 
   const linha = { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 12 };
   const caixaIcone = { width: 28, alignItems: 'center' };
 
   return (
-    <>
-      <Tab.Navigator
-        screenOptions={({ route }) => ({
-          headerShown: true,
-          headerTitle: '',
-          headerShadowVisible: false,
-          headerStyle: { backgroundColor: colors.background },
-          headerLeft: () => (
-            <TouchableOpacity onPress={abrir} style={{ marginLeft: 16 }}>
-              <Ionicons name="menu" size={28} color={colors.text} />
-            </TouchableOpacity>
-          ),
-          tabBarActiveTintColor: colors.olive,
-          tabBarInactiveTintColor: colors.textSecondary,
-          tabBarIcon: ({ color, size }) => <Ionicons name={ICONES[route.name]} size={size} color={color} />,
-        })}
-      >
-        <Tab.Screen name="Home" component={HomeScreen} />
-        <Tab.Screen name="Tarefa" component={TarefaScreen} options={{ title: 'Tarefas' }} />
-        <Tab.Screen name="Calendario" component={CalendarioScreen} options={{ title: 'Calendário' }} />
-        <Tab.Screen name="Horarios" component={HorariosScreen} options={{ title: 'Horários' }} />
-      </Tab.Navigator>
-
+    <MenuContext.Provider value={{ abrir }}>
+      {children}
       <Modal visible={menu} transparent animationType="none" onRequestClose={() => fechar()}>
         <View style={{ flex: 1 }}>
           <Animated.View style={{ ...StyleSheetAbsolute, backgroundColor: 'rgba(0,0,0,0.4)', opacity: anim }}>
@@ -752,21 +798,75 @@ function Tabs({ navigation }) {
           </Animated.View>
         </View>
       </Modal>
-    </>
+    </MenuContext.Provider>
+  );
+}
+
+function BotaoMenu() {
+  const { abrir } = useContext(MenuContext);
+  return (
+    <TouchableOpacity onPress={abrir} style={{ marginLeft: 16 }}>
+      <Ionicons name="menu" size={28} color={colors.text} />
+    </TouchableOpacity>
+  );
+}
+
+const telaMenu = (title) => ({
+  headerShown: true,
+  title,
+  headerBackVisible: false,
+  headerLeft: () => <BotaoMenu />,
+});
+
+function Tabs() {
+  return (
+    <Tab.Navigator
+      screenOptions={({ route }) => ({
+        headerShown: true,
+        headerTitle: '',
+        headerShadowVisible: false,
+        headerStyle: { backgroundColor: colors.background },
+        headerLeft: () => <BotaoMenu />,
+        tabBarActiveTintColor: colors.olive,
+        tabBarInactiveTintColor: colors.textSecondary,
+        tabBarIcon: ({ color, size }) => <Ionicons name={ICONES[route.name]} size={size} color={color} />,
+      })}
+    >
+      <Tab.Screen name="Home" component={HomeScreen} />
+      <Tab.Screen name="Tarefa" component={TarefaScreen} options={{ title: 'Tarefas' }} />
+      <Tab.Screen name="Calendario" component={CalendarioScreen} options={{ title: 'Calendário' }} />
+      <Tab.Screen name="Horarios" component={HorariosScreen} options={{ title: 'Horários' }} />
+    </Tab.Navigator>
   );
 }
 
 export default function App() {
+  const [escala, setEscalaState] = useState(1);
+
+  useEffect(() => {
+    AsyncStorage.getItem('escala').then((v) => v && setEscalaState(parseFloat(v)));
+  }, []);
+
+  const setEscala = (v) => {
+    setEscalaState(v);
+    AsyncStorage.setItem('escala', String(v));
+  };
+
   return (
-    <NavigationContainer>
-      <Stack.Navigator initialRouteName="Login" screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="Login" component={LoginScreen} />
-        <Stack.Screen name="Cadastro" component={CadastroScreen} />
-        <Stack.Screen name="Main" component={Tabs} />
-        <Stack.Screen name="Lembretes" component={LembretesScreen} options={{ headerShown: true, title: 'Lembretes' }} />
-        <Stack.Screen name="Notas" component={NotasScreen} options={{ headerShown: true, title: 'Notas e Desempenho' }} />
-        <Stack.Screen name="Metas" component={MetasScreen} options={{ headerShown: true, title: 'Metas de Estudo' }} />
-      </Stack.Navigator>
-    </NavigationContainer>
+    <ConfigContext.Provider value={{ escala, setEscala }}>
+      <NavigationContainer ref={navRef}>
+        <MenuProvider>
+          <Stack.Navigator initialRouteName="Login" screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="Login" component={LoginScreen} />
+            <Stack.Screen name="Cadastro" component={CadastroScreen} />
+            <Stack.Screen name="Main" component={Tabs} />
+            <Stack.Screen name="Lembretes" component={LembretesScreen} options={telaMenu('Lembretes')} />
+            <Stack.Screen name="Notas" component={NotasScreen} options={telaMenu('Notas e Desempenho')} />
+            <Stack.Screen name="Metas" component={MetasScreen} options={telaMenu('Metas de Estudo')} />
+            <Stack.Screen name="Perfil" component={PerfilScreen} options={telaMenu('Perfil e Acessibilidade')} />
+           </Stack.Navigator>
+        </MenuProvider>
+      </NavigationContainer>
+    </ConfigContext.Provider>
   );
 }
