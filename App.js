@@ -1,14 +1,14 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native';
+import { NavigationContainer, createNavigationContainerRef, useIsFocused } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import * as Calendar from 'expo-calendar';
 import Constants from 'expo-constants';
+import * as Haptics from 'expo-haptics';
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { Alert, Animated, Dimensions, FlatList, Modal, Platform, Text as RNText, ScrollView, StyleSheet, TextInput, TouchableOpacity, View } from 'react-native';
 import { colors, styles } from './styles';
-2
 
 const ConfigContext = createContext({ escala: 1, setEscala: () => {} });
 
@@ -116,9 +116,10 @@ async function apagarEvento(eventoId) {
 
 function useLista(chave) {
   const [itens, setItens] = useState([]);
+  const focada = useIsFocused();
   useEffect(() => {
-    AsyncStorage.getItem(chave).then((v) => v && setItens(JSON.parse(v)));
-  }, []);
+    if (focada) AsyncStorage.getItem(chave).then((v) => setItens(v ? JSON.parse(v) : []));
+  }, [focada]);
   const salvar = (novos) => {
     setItens(novos);
     AsyncStorage.setItem(chave, JSON.stringify(novos));
@@ -343,7 +344,7 @@ function MetasScreen() {
             </>}
           >
             <Text style={styles.cardTitulo}>{item.titulo}</Text>
-            <Text style={styles.cardDescricao}>{item.feito}/{item.alvo}h</Text>
+            <Text style={styles.cardDescricao}>{Math.round(item.feito * 10) / 10}/{item.alvo}h</Text>
             <Text style={[styles.cardTipo, { color: pct >= 100 ? colors.olive : colors.tan }]}>{pct}%</Text>
           </Card>
         );
@@ -704,6 +705,117 @@ function PerfilScreen({ navigation }) {
     </ScrollView>
   );
 }
+const DURACOES = { Foco: [15, 25, 45, 60], Pausa: [5, 10, 15] };
+const fmtTempo = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+function FocoScreen() {
+  const [metas, salvarMetas] = useLista('metas');
+  const [sessoes, salvarSessoes] = useLista('foco');
+  const [modo, setModo] = useState('Foco');
+  const [minutos, setMinutos] = useState(25);
+  const [restante, setRestante] = useState(25 * 60);
+  const [rodando, setRodando] = useState(false);
+  const [metaId, setMetaId] = useState(null);
+  const fim = useRef(0);
+
+  const total = minutos * 60;
+  const iniciada = restante < total;
+
+  const trocarModo = (m, min = DURACOES[m][m === 'Foco' ? 1 : 0]) => {
+    setRodando(false);
+    setModo(m);
+    setMinutos(min);
+    setRestante(min * 60);
+  };
+
+  const escolherDuracao = (min) => {
+    setMinutos(min);
+    setRestante(min * 60);
+  };
+
+  const alternar = () => {
+    if (!rodando) fim.current = Date.now() + restante * 1000;
+    setRodando(!rodando);
+  };
+
+  // Calcula pelo horário de término: continua certo mesmo se o app ficar em segundo plano
+  useEffect(() => {
+    if (!rodando) return;
+    const t = setInterval(() => setRestante(Math.max(0, Math.round((fim.current - Date.now()) / 1000))), 500);
+    return () => clearInterval(t);
+  }, [rodando]);
+
+  useEffect(() => {
+    if (rodando && restante === 0) concluir();
+  }, [restante, rodando]);
+
+  const concluir = () => {
+    setRodando(false);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    if (modo === 'Foco') {
+      salvarSessoes([...sessoes, { id: Date.now().toString(), data: new Date().toISOString(), minutos }]);
+      if (metaId) {
+        salvarMetas(metas.map((m) => (m.id === metaId ? { ...m, feito: Math.round((m.feito + minutos / 60) * 100) / 100 } : m)));
+      }
+      Alert.alert('Sessão concluída!', `Você focou por ${minutos} min. Hora de uma pausa.`);
+      trocarModo('Pausa');
+    } else {
+      Alert.alert('Pausa terminada', 'Vamos voltar ao foco?');
+      trocarModo('Foco');
+    }
+  };
+
+  const hoje = new Date().toDateString();
+  const deHoje = sessoes.filter((s) => new Date(s.data).toDateString() === hoje);
+  const minHoje = deHoje.reduce((soma, s) => soma + s.minutos, 0);
+  const metaAtual = metas.find((m) => m.id === metaId);
+  const pct = total ? ((total - restante) / total) * 100 : 0;
+  const cor = modo === 'Foco' ? colors.olive : colors.tan;
+
+  return (
+    <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
+      <Chips opcoes={['Foco', 'Pausa']} valor={modo} onChange={(m) => !rodando && trocarModo(m)} />
+
+      <View style={{ alignItems: 'center', marginVertical: 24 }}>
+        <Text style={{ fontSize: 64, fontWeight: 'bold', color: cor }}>{fmtTempo(restante)}</Text>
+        <View style={{ height: 8, width: '100%', backgroundColor: colors.border, borderRadius: 4, marginTop: 16, overflow: 'hidden' }}>
+          <View style={{ height: 8, width: `${pct}%`, backgroundColor: cor }} />
+        </View>
+        {modo === 'Foco' && metaAtual ? <Text style={[styles.cardDescricao, { marginTop: 12 }]}>Contando para: {metaAtual.titulo}</Text> : null}
+      </View>
+
+      <TouchableOpacity style={[styles.botao, { backgroundColor: cor }]} onPress={alternar}>
+        <Text style={styles.botaoTexto}>{rodando ? 'Pausar' : iniciada ? 'Continuar' : 'Iniciar'}</Text>
+      </TouchableOpacity>
+      {iniciada ? (
+        <TouchableOpacity style={[styles.botao, styles.botaoCancelar]} onPress={() => trocarModo(modo, minutos)}>
+          <Text style={styles.botaoTexto}>Reiniciar</Text>
+        </TouchableOpacity>
+      ) : null}
+
+      <View style={{ opacity: rodando ? 0.4 : 1, marginTop: 24 }} pointerEvents={rodando ? 'none' : 'auto'}>
+        <Text style={styles.rotulo}>Duração (minutos)</Text>
+        <Chips opcoes={DURACOES[modo].map(String)} valor={String(minutos)} onChange={(v) => escolherDuracao(Number(v))} />
+        {modo === 'Foco' && metas.length > 0 ? (
+          <>
+            <Text style={styles.rotulo}>Contar horas em qual meta?</Text>
+            <Chips
+              opcoes={['Nenhuma', ...metas.map((m) => m.titulo)]}
+              valor={metaAtual?.titulo || 'Nenhuma'}
+              onChange={(t) => setMetaId(metas.find((m) => m.titulo === t)?.id || null)}
+            />
+          </>
+        ) : null}
+      </View>
+
+      <Text style={[styles.secaoTitulo, { marginTop: 16 }]}>Hoje</Text>
+      <Text style={styles.cardDescricao}>
+        {deHoje.length} sessão(ões) de foco · {minHoje} min
+      </Text>
+    </ScrollView>
+  );
+}
+
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -715,6 +827,7 @@ const MENU = [
   { nome: 'Lembretes', rotulo: 'Lembretes', icone: 'notifications-outline' },
   { nome: 'Notas', rotulo: 'Notas e Desempenho', icone: 'bar-chart-outline' },
   { nome: 'Metas', rotulo: 'Metas de Estudo', icone: 'flag-outline' },
+  { nome: 'Foco', rotulo: 'Modo de foco', icone: 'timer-outline' },
   { nome: 'Perfil', rotulo: 'Perfil e Acessibilidade', icone: 'person-outline' },
 ];
 const ICONES = Object.fromEntries(MENU.map((m) => [m.nome, m.icone]));
@@ -863,6 +976,7 @@ export default function App() {
             <Stack.Screen name="Lembretes" component={LembretesScreen} options={telaMenu('Lembretes')} />
             <Stack.Screen name="Notas" component={NotasScreen} options={telaMenu('Notas e Desempenho')} />
             <Stack.Screen name="Metas" component={MetasScreen} options={telaMenu('Metas de Estudo')} />
+            <Stack.Screen name="Foco" component={FocoScreen} options={telaMenu('Modo de foco')} />
             <Stack.Screen name="Perfil" component={PerfilScreen} options={telaMenu('Perfil e Acessibilidade')} />
            </Stack.Navigator>
         </MenuProvider>
